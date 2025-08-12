@@ -1,0 +1,5 @@
+streamlit
+graphviz
+pandas
+requests
+beautifulsoup4

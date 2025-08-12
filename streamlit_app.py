@@ -1,7 +1,8 @@
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, date
 import uuid
 import os
+import json
 import pandas as pd
 import graphviz
 from supabase import create_client, Client
@@ -109,13 +110,17 @@ with st.sidebar:
                 st.session_state.authenticated = True
                 st.session_state.user_email = email
                 st.session_state.user_data = load_user_data(email)
+                # Simulate Supabase session: must be set for messaging
+                # Here, we fake a session user dict, but in reality, you'd set this after supabase login
+                if "user" not in st.session_state:
+                    # Use email as id fallback if not using Supabase auth
+                    st.session_state.user = {"id": email, "email": email}
                 st.success(f"Welcome, {email}")
             else:
                 st.error("Invalid credentials.")
 
 # ---------- Main App ----------
 if st.session_state.authenticated and "user" in st.session_state:
-    # Tabs: Home, Messaging, History, Biodata, Tools
     tabs = st.tabs(["🏠 Home", "💬 Messaging", "📚 History", "👤 Biodata", "🧰 Tools"])
 
     # ---------- Home Tab ----------
@@ -147,7 +152,6 @@ if st.session_state.authenticated and "user" in st.session_state:
     # ---------- Messaging Tab ----------
     with tabs[1]:
         st.header("💬 Messaging")
-
         current_user_id = st.session_state["user"]["id"]
 
         # --- Search for contact ---
@@ -176,7 +180,7 @@ if st.session_state.authenticated and "user" in st.session_state:
         if not contact_ids:
             st.info("No accepted contacts yet.")
         else:
-            # Optional: Get contact emails/usernames if you have a users table
+            # Get contact labels (email if available, else id)
             contact_options = []
             user_table = supabase.table("users")
             for uid in contact_ids:
@@ -187,56 +191,53 @@ if st.session_state.authenticated and "user" in st.session_state:
                     contact_options.append({"id": uid, "label": str(uid)})
 
             contact_labels = [c["label"] for c in contact_options]
-            selected_idx = st.selectbox("Choose a contact", range(len(contact_labels)), format_func=lambda i: contact_labels[i])
-            selected_contact = contact_options[selected_idx]["id"]
+            if contact_labels:
+                selected_idx = st.selectbox("Choose a contact", range(len(contact_labels)), format_func=lambda i: contact_labels[i])
+                selected_contact = contact_options[selected_idx]["id"]
 
-            # --- Load messages ---
-            def load_messages():
-                msgs = supabase.table("messages").select("*").or_(
-                    f"(sender_id.eq.{current_user_id},receiver_id.eq.{selected_contact}),"
-                    f"(sender_id.eq.{selected_contact},receiver_id.eq.{current_user_id})"
-                ).order("created_at", desc=False).execute().data
-                return msgs
+                # --- Load messages ---
+                def load_messages():
+                    msgs = supabase.table("messages").select("*").or_(
+                        f"(sender_id.eq.{current_user_id},receiver_id.eq.{selected_contact}),"
+                        f"(sender_id.eq.{selected_contact},receiver_id.eq.{current_user_id})"
+                    ).order("created_at", desc=False).execute().data
+                    return msgs
 
-            msgs = load_messages()
-
-            st.markdown("### Chat")
-            for m in msgs:
-                sender = "You" if m["sender_id"] == current_user_id else next((c["label"] for c in contact_options if c["id"] == m["sender_id"]), str(m["sender_id"]))
-                if m["text"]:
-                    st.markdown(f"**{sender}:** {m['text']}  \n<sub>{m['created_at']}</sub>", unsafe_allow_html=True)
-                if m.get("media_url"):
-                    if m.get("media_type") == "image/png":
-                        st.image(m["media_url"], width=200)
-                    elif m.get("media_type") == "application/pdf":
-                        st.markdown(f"[📄 PDF File]({m['media_url']})")
-
-            # --- Send new message ---
-            st.subheader("Send a Message")
-            new_text = st.text_input("Type your message", key="msg_text")
-            uploaded_file = st.file_uploader("Send a file (PNG or PDF)", type=["png", "pdf"], key="msg_file")
-
-            if st.button("Send", key="send_btn"):
-                media_url = None
-                media_type = None
-                if uploaded_file is not None:
-                    filename = f"{uuid.uuid4()}_{uploaded_file.name}"
-                    res = supabase.storage.from_("chat_files").upload(filename, uploaded_file)
-                    if res.status_code == 200:
-                        media_url = f"{SUPABASE_URL}/storage/v1/object/public/chat_files/{filename}"
-                        media_type = uploaded_file.type
-                    else:
-                        st.error("Failed to upload file.")
-                supabase.table("messages").insert({
-                    "sender_id": current_user_id,
-                    "receiver_id": selected_contact,
-                    "text": new_text if new_text else None,
-                    "media_url": media_url,
-                    "media_type": media_type
-                }).execute()
-                st.experimental_rerun()
-
-            st.caption("Refresh the page to see new messages. (Polling every page load)")
+                msgs = load_messages()
+                st.markdown("### Chat")
+                for m in msgs:
+                    sender = "You" if m["sender_id"] == current_user_id else next((c["label"] for c in contact_options if c["id"] == m["sender_id"]), str(m["sender_id"]))
+                    if m["text"]:
+                        st.markdown(f"**{sender}:** {m['text']}  \n<sub>{m['created_at']}</sub>", unsafe_allow_html=True)
+                    if m.get("media_url"):
+                        if m.get("media_type") == "image/png":
+                            st.image(m["media_url"], width=200)
+                        elif m.get("media_type") == "application/pdf":
+                            st.markdown(f"[📄 PDF File]({m['media_url']})")
+                # --- Send new message ---
+                st.subheader("Send a Message")
+                new_text = st.text_input("Type your message", key="msg_text")
+                uploaded_file = st.file_uploader("Send a file (PNG or PDF)", type=["png", "pdf"], key="msg_file")
+                if st.button("Send", key="send_btn"):
+                    media_url = None
+                    media_type = None
+                    if uploaded_file is not None:
+                        filename = f"{uuid.uuid4()}_{uploaded_file.name}"
+                        res = supabase.storage.from_("chat_files").upload(filename, uploaded_file)
+                        if res.status_code == 200:
+                            media_url = f"{SUPABASE_URL}/storage/v1/object/public/chat_files/{filename}"
+                            media_type = uploaded_file.type
+                        else:
+                            st.error("Failed to upload file.")
+                    supabase.table("messages").insert({
+                        "sender_id": current_user_id,
+                        "receiver_id": selected_contact,
+                        "text": new_text if new_text else None,
+                        "media_url": media_url,
+                        "media_type": media_type
+                    }).execute()
+                    st.experimental_rerun()
+                st.caption("Refresh the page to see new messages. (Polling every page load)")
 
     # ---------- History Tab ----------
     with tabs[2]:
@@ -272,7 +273,7 @@ if st.session_state.authenticated and "user" in st.session_state:
         bio = st.session_state.user_data.get("bio", {})
         with st.form("bio_form"):
             name = st.text_input("Full Name", value=bio.get("name", ""))
-            dob = st.date_input("Date of Birth", value=datetime(2000, 1, 1))
+            dob = st.date_input("Date of Birth", value=date(2000, 1, 1))
             email = st.text_input("Email", value=st.session_state.user_email)
             marital = st.selectbox("Marital Status", ["Single", "Married", "Divorced", "Widowed"])
             birth = st.text_input("Place of Birth", value=bio.get("birth_place", ""))

@@ -2,5 +2,6 @@ streamlit
 graphviz
 pandas
 requests
-supabase
+supabase-py
 beautifulsoup4
+

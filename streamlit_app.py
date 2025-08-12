@@ -1,10 +1,10 @@
 import streamlit as st
-import hashlib
-import json
+from datetime import datetime
+import uuid
 import os
-import graphviz
 import pandas as pd
-from datetime import date, datetime
+import graphviz
+from supabase import create_client, Client
 import base64
 import random
 
@@ -13,12 +13,16 @@ st.set_page_config(page_title="Jalinan Insan", page_icon="👥", layout="wide")
 USER_FILE = "users.json"
 DATA_DIR = "user_data"
 LOGO_PATH = "logoJK.png"
-MESSAGES_FILE = "messages.json"
+
+# --- Supabase Setup ---
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# ---------- Helper Functions ----------
+# ---------- Load logo image ----------
 def get_image_base64(path):
     try:
         with open(path, "rb") as img_file:
@@ -26,7 +30,16 @@ def get_image_base64(path):
     except Exception:
         return ""
 
+def render_logo(center=True, size="large"):
+    image_base64 = get_image_base64(LOGO_PATH)
+    width = 200 if size == "large" else 100
+    alignment = "center" if center else "left"
+    if image_base64:
+        st.markdown(f"<div style='text-align:{alignment};'><img src='data:image/png;base64,{image_base64}' width='{width}'></div>", unsafe_allow_html=True)
+
+# ---------- Helper Functions ----------
 def hash_password(password):
+    import hashlib
     return hashlib.sha256(password.encode()).hexdigest()
 
 def load_users():
@@ -53,23 +66,6 @@ def save_user_data(email, data):
     with open(get_user_data_path(email), "w") as f:
         json.dump(data, f, indent=2)
 
-def load_messages():
-    if os.path.exists(MESSAGES_FILE):
-        with open(MESSAGES_FILE, "r") as f:
-            return json.load(f)
-    return []
-
-def save_messages(messages):
-    with open(MESSAGES_FILE, "w") as f:
-        json.dump(messages, f, indent=2)
-
-def render_logo(center=True, size="large"):
-    image_base64 = get_image_base64(LOGO_PATH)
-    width = 200 if size == "large" else 100
-    alignment = "center" if center else "left"
-    if image_base64:
-        st.markdown(f"<div style='text-align:{alignment};'><img src='data:image/png;base64,{image_base64}' width='{width}'></div>", unsafe_allow_html=True)
-
 # ---------- Session State ----------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -87,8 +83,6 @@ if "social_graph" not in st.session_state:
     st.session_state.social_graph = graphviz.Digraph()
 if "current_genogram" not in st.session_state:
     st.session_state.current_genogram = None
-if "selected_conversation" not in st.session_state:
-    st.session_state.selected_conversation = None
 
 # ---------- Sidebar Login/Signup ----------
 with st.sidebar:
@@ -120,10 +114,11 @@ with st.sidebar:
                 st.error("Invalid credentials.")
 
 # ---------- Main App ----------
-if st.session_state.authenticated:
+if st.session_state.authenticated and "user" in st.session_state:
+    # Tabs: Home, Messaging, History, Biodata, Tools
     tabs = st.tabs(["🏠 Home", "💬 Messaging", "📚 History", "👤 Biodata", "🧰 Tools"])
 
-    # ---------- Home ----------
+    # ---------- Home Tab ----------
     with tabs[0]:
         render_logo()
         st.success("🌟 Welcome to Jalinan Insan")
@@ -149,41 +144,101 @@ if st.session_state.authenticated:
         ]))
         st.markdown("### 📰 Latest News")
 
-    # ---------- Messaging ----------
+    # ---------- Messaging Tab ----------
     with tabs[1]:
         st.header("💬 Messaging")
-        all_users = [u for u in load_users().keys() if u != st.session_state.user_email]
-        if not all_users:
-            st.info("No other users available to chat with.")
+
+        current_user_id = st.session_state["user"]["id"]
+
+        # --- Search for contact ---
+        st.subheader("Search Contact")
+        search_id = st.text_input("Enter user ID to search")
+        if search_id:
+            result = supabase.table("contacts").select("*").or_(
+                f"(requester_id.eq.{current_user_id},requestee_id.eq.{search_id})"
+            ).execute()
+            if not result.data:
+                st.info("No contact found. You may need to send/accept a request first.")
+            else:
+                st.success("A contact exists with this user.")
+
+        # --- Get user's accepted contacts ---
+        contacts_data = supabase.table("contacts").select("*").or_(
+            f"(requester_id.eq.{current_user_id},requestee_id.eq.{current_user_id})"
+        ).eq("status", "accepted").execute().data
+
+        contact_ids = [
+            c["requester_id"] if c["requester_id"] != current_user_id else c["requestee_id"]
+            for c in contacts_data
+        ]
+
+        st.subheader("Your Contacts")
+        if not contact_ids:
+            st.info("No accepted contacts yet.")
         else:
-            # Select user to chat with
-            selected_user = st.selectbox("Select a user to chat with:", options=all_users, key="msg_select_user")
-            st.session_state.selected_conversation = selected_user
-            messages = load_messages()
-            conversation = [
-                m for m in messages if
-                (m["from"] == st.session_state.user_email and m["to"] == selected_user) or
-                (m["from"] == selected_user and m["to"] == st.session_state.user_email)
-            ]
-            st.markdown(f"#### Conversation with **{selected_user}**")
-            for msg in conversation:
-                who = "You" if msg["from"] == st.session_state.user_email else selected_user
-                st.markdown(f"**{who}:** {msg['message']}  \n<sub>{msg['timestamp']}</sub>", unsafe_allow_html=True)
-            # Compose message
-            with st.form("send_message_form", clear_on_submit=True):
-                new_msg = st.text_area("Your message")
-                send_btn = st.form_submit_button("Send")
-            if send_btn and new_msg.strip():
-                messages.append({
-                    "from": st.session_state.user_email,
-                    "to": selected_user,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "message": new_msg.strip()
-                })
-                save_messages(messages)
+            # Optional: Get contact emails/usernames if you have a users table
+            contact_options = []
+            user_table = supabase.table("users")
+            for uid in contact_ids:
+                res = user_table.select("email").eq("id", uid).execute()
+                if res.data:
+                    contact_options.append({"id": uid, "label": res.data[0]["email"]})
+                else:
+                    contact_options.append({"id": uid, "label": str(uid)})
+
+            contact_labels = [c["label"] for c in contact_options]
+            selected_idx = st.selectbox("Choose a contact", range(len(contact_labels)), format_func=lambda i: contact_labels[i])
+            selected_contact = contact_options[selected_idx]["id"]
+
+            # --- Load messages ---
+            def load_messages():
+                msgs = supabase.table("messages").select("*").or_(
+                    f"(sender_id.eq.{current_user_id},receiver_id.eq.{selected_contact}),"
+                    f"(sender_id.eq.{selected_contact},receiver_id.eq.{current_user_id})"
+                ).order("created_at", desc=False).execute().data
+                return msgs
+
+            msgs = load_messages()
+
+            st.markdown("### Chat")
+            for m in msgs:
+                sender = "You" if m["sender_id"] == current_user_id else next((c["label"] for c in contact_options if c["id"] == m["sender_id"]), str(m["sender_id"]))
+                if m["text"]:
+                    st.markdown(f"**{sender}:** {m['text']}  \n<sub>{m['created_at']}</sub>", unsafe_allow_html=True)
+                if m.get("media_url"):
+                    if m.get("media_type") == "image/png":
+                        st.image(m["media_url"], width=200)
+                    elif m.get("media_type") == "application/pdf":
+                        st.markdown(f"[📄 PDF File]({m['media_url']})")
+
+            # --- Send new message ---
+            st.subheader("Send a Message")
+            new_text = st.text_input("Type your message", key="msg_text")
+            uploaded_file = st.file_uploader("Send a file (PNG or PDF)", type=["png", "pdf"], key="msg_file")
+
+            if st.button("Send", key="send_btn"):
+                media_url = None
+                media_type = None
+                if uploaded_file is not None:
+                    filename = f"{uuid.uuid4()}_{uploaded_file.name}"
+                    res = supabase.storage.from_("chat_files").upload(filename, uploaded_file)
+                    if res.status_code == 200:
+                        media_url = f"{SUPABASE_URL}/storage/v1/object/public/chat_files/{filename}"
+                        media_type = uploaded_file.type
+                    else:
+                        st.error("Failed to upload file.")
+                supabase.table("messages").insert({
+                    "sender_id": current_user_id,
+                    "receiver_id": selected_contact,
+                    "text": new_text if new_text else None,
+                    "media_url": media_url,
+                    "media_type": media_type
+                }).execute()
                 st.experimental_rerun()
 
-    # ---------- History ----------
+            st.caption("Refresh the page to see new messages. (Polling every page load)")
+
+    # ---------- History Tab ----------
     with tabs[2]:
         st.header("📚 History")
         history_data = st.session_state.user_data.get("history", [])
@@ -211,13 +266,13 @@ if st.session_state.authenticated:
                     save_user_data(st.session_state.user_email, st.session_state.user_data)
                     st.experimental_rerun()
 
-    # ---------- Biodata ----------
+    # ---------- Biodata Tab ----------
     with tabs[3]:
         st.header("👤 Biodata")
         bio = st.session_state.user_data.get("bio", {})
         with st.form("bio_form"):
             name = st.text_input("Full Name", value=bio.get("name", ""))
-            dob = st.date_input("Date of Birth", value=date(2000, 1, 1))
+            dob = st.date_input("Date of Birth", value=datetime(2000, 1, 1))
             email = st.text_input("Email", value=st.session_state.user_email)
             marital = st.selectbox("Marital Status", ["Single", "Married", "Divorced", "Widowed"])
             birth = st.text_input("Place of Birth", value=bio.get("birth_place", ""))
@@ -232,10 +287,9 @@ if st.session_state.authenticated:
                 save_user_data(st.session_state.user_email, st.session_state.user_data)
                 st.success("Saved.")
 
-    # ---------- Tools ----------
+    # ---------- Tools Tab ----------
     with tabs[4]:
         st.header("🧰 Tools")
-
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("👨‍👩‍👧‍👦 Genogram"):
@@ -249,7 +303,6 @@ if st.session_state.authenticated:
         with col4:
             if st.button("🛣️ Life Roadmap"):
                 st.session_state.selected_tool = "Life"
-
         tool = st.session_state.selected_tool
 
         # ---------- Genogram ----------

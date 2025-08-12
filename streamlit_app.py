@@ -7,31 +7,25 @@ import pandas as pd
 from datetime import date, datetime
 import base64
 import random
-import requests
-from bs4 import BeautifulSoup
 
 # ---------- Configurations ----------
 st.set_page_config(page_title="Jalinan Insan", page_icon="👥", layout="wide")
 USER_FILE = "users.json"
 DATA_DIR = "user_data"
-LOGO_PATH = "LogoJK.png"
+LOGO_PATH = "logoJK.png"
+MESSAGES_FILE = "messages.json"
 
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# ---------- Load logo image ----------
-def get_image_base64(path):
-    with open(path, "rb") as img_file:
-        return base64.b64encode(img_file.read()).decode()
-
-image_base64 = get_image_base64(LOGO_PATH)
-
-def render_logo(center=True, size="large"):
-    width = 200 if size == "large" else 100
-    alignment = "center" if center else "left"
-    st.markdown(f"<div style='text-align:{alignment};'><img src='data:image/png;base64,{image_base64}' width='{width}'></div>", unsafe_allow_html=True)
-
 # ---------- Helper Functions ----------
+def get_image_base64(path):
+    try:
+        with open(path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    except Exception:
+        return ""
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -59,6 +53,23 @@ def save_user_data(email, data):
     with open(get_user_data_path(email), "w") as f:
         json.dump(data, f, indent=2)
 
+def load_messages():
+    if os.path.exists(MESSAGES_FILE):
+        with open(MESSAGES_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_messages(messages):
+    with open(MESSAGES_FILE, "w") as f:
+        json.dump(messages, f, indent=2)
+
+def render_logo(center=True, size="large"):
+    image_base64 = get_image_base64(LOGO_PATH)
+    width = 200 if size == "large" else 100
+    alignment = "center" if center else "left"
+    if image_base64:
+        st.markdown(f"<div style='text-align:{alignment};'><img src='data:image/png;base64,{image_base64}' width='{width}'></div>", unsafe_allow_html=True)
+
 # ---------- Session State ----------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -76,6 +87,8 @@ if "social_graph" not in st.session_state:
     st.session_state.social_graph = graphviz.Digraph()
 if "current_genogram" not in st.session_state:
     st.session_state.current_genogram = None
+if "selected_conversation" not in st.session_state:
+    st.session_state.selected_conversation = None
 
 # ---------- Sidebar Login/Signup ----------
 with st.sidebar:
@@ -108,7 +121,7 @@ with st.sidebar:
 
 # ---------- Main App ----------
 if st.session_state.authenticated:
-    tabs = st.tabs(["🏠 Home", "📚 History", "👤 Biodata", "🧰 Tools"])
+    tabs = st.tabs(["🏠 Home", "💬 Messaging", "📚 History", "👤 Biodata", "🧰 Tools"])
 
     # ---------- Home ----------
     with tabs[0]:
@@ -118,7 +131,6 @@ if st.session_state.authenticated:
         st.markdown(f"**Name:** {bio.get('name', 'Not set')}")
         st.markdown(f"**Email:** {st.session_state.user_email}")
         st.markdown(f"**Place of Birth:** {bio.get('birth_place', 'Not set')}")
-
         st.success("🌟 Quote of the Day")
         st.info(random.choice([
             "Helping one person might not change the world, but it could change the world for one person.",
@@ -135,48 +147,72 @@ if st.session_state.authenticated:
             "Any problems can occur at any moments, thus confirmation is important.",
             "The past is in the past."
         ]))
-        
-        # News Section
         st.markdown("### 📰 Latest News")
 
-    # ---------- History ----------
+    # ---------- Messaging ----------
     with tabs[1]:
-        st.header("📚 History")
-        history_data = st.session_state.user_data.get("history", [])
-        
-        if not history_data:
-            st.info("No saved maps yet. Create some using the Tools tab!")
-            st.stop()
-            
-        for i, item in enumerate(history_data):
-            st.divider()
-            st.subheader(f"{item['type']}: {item['title']}")
-            st.caption(f"Created: {item.get('timestamp', 'Unknown')}")
-            
-            if item["type"] in ["Genogram", "Ecomap", "Social Network"]:
-                try:
-                    # Render Graphviz diagrams
-                    st.graphviz_chart(item["dot"])
-                except Exception as e:
-                    st.error(f"Could not render diagram: {str(e)}")
-                    
-            elif item["type"] == "Life Roadmap":
-                # Render life roadmap
-                if "data" in item:
-                    df = pd.DataFrame(item["data"], columns=["Time", "Event", "Impact"])
-                    st.line_chart(df.set_index("Time")["Impact"])
-                    st.dataframe(df)
-                else:
-                    st.warning("No data available for this roadmap")
-            
-            # Delete button
-            if st.button(f"❌ Delete this {item['type']}", key=f"delete_{i}"):
-                del st.session_state.user_data["history"][i]
-                save_user_data(st.session_state.user_email, st.session_state.user_data)
+        st.header("💬 Messaging")
+        all_users = [u for u in load_users().keys() if u != st.session_state.user_email]
+        if not all_users:
+            st.info("No other users available to chat with.")
+        else:
+            # Select user to chat with
+            selected_user = st.selectbox("Select a user to chat with:", options=all_users, key="msg_select_user")
+            st.session_state.selected_conversation = selected_user
+            messages = load_messages()
+            conversation = [
+                m for m in messages if
+                (m["from"] == st.session_state.user_email and m["to"] == selected_user) or
+                (m["from"] == selected_user and m["to"] == st.session_state.user_email)
+            ]
+            st.markdown(f"#### Conversation with **{selected_user}**")
+            for msg in conversation:
+                who = "You" if msg["from"] == st.session_state.user_email else selected_user
+                st.markdown(f"**{who}:** {msg['message']}  \n<sub>{msg['timestamp']}</sub>", unsafe_allow_html=True)
+            # Compose message
+            with st.form("send_message_form", clear_on_submit=True):
+                new_msg = st.text_area("Your message")
+                send_btn = st.form_submit_button("Send")
+            if send_btn and new_msg.strip():
+                messages.append({
+                    "from": st.session_state.user_email,
+                    "to": selected_user,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "message": new_msg.strip()
+                })
+                save_messages(messages)
                 st.experimental_rerun()
 
-    # ---------- Biodata ----------
+    # ---------- History ----------
     with tabs[2]:
+        st.header("📚 History")
+        history_data = st.session_state.user_data.get("history", [])
+        if not history_data:
+            st.info("No saved maps yet. Create some using the Tools tab!")
+        else:
+            for i, item in enumerate(history_data):
+                st.divider()
+                st.subheader(f"{item['type']}: {item['title']}")
+                st.caption(f"Created: {item.get('timestamp', 'Unknown')}")
+                if item["type"] in ["Genogram", "Ecomap", "Social Network"]:
+                    try:
+                        st.graphviz_chart(item["dot"])
+                    except Exception as e:
+                        st.error(f"Could not render diagram: {str(e)}")
+                elif item["type"] == "Life Roadmap":
+                    if "data" in item:
+                        df = pd.DataFrame(item["data"], columns=["Time", "Event", "Impact"])
+                        st.line_chart(df.set_index("Time")["Impact"])
+                        st.dataframe(df)
+                    else:
+                        st.warning("No data available for this roadmap")
+                if st.button(f"❌ Delete this {item['type']}", key=f"delete_{i}"):
+                    del st.session_state.user_data["history"][i]
+                    save_user_data(st.session_state.user_email, st.session_state.user_data)
+                    st.experimental_rerun()
+
+    # ---------- Biodata ----------
+    with tabs[3]:
         st.header("👤 Biodata")
         bio = st.session_state.user_data.get("bio", {})
         with st.form("bio_form"):
@@ -197,10 +233,9 @@ if st.session_state.authenticated:
                 st.success("Saved.")
 
     # ---------- Tools ----------
-    with tabs[3]:
+    with tabs[4]:
         st.header("🧰 Tools")
 
-        # Tool Icon Buttons
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("👨‍👩‍👧‍👦 Genogram"):
@@ -215,7 +250,6 @@ if st.session_state.authenticated:
             if st.button("🛣️ Life Roadmap"):
                 st.session_state.selected_tool = "Life"
 
-        # Render Selected Tool
         tool = st.session_state.selected_tool
 
         # ---------- Genogram ----------
@@ -245,61 +279,44 @@ if st.session_state.authenticated:
                 submitted = st.form_submit_button("Generate Genogram")
 
             if submitted:
-                # Create the graph
                 dot = graphviz.Digraph()
-                
                 def node(name, gender):
                     if gender == "M":
                         dot.node(name, name, shape="box", style="filled", fillcolor="lightblue")
                     else:
                         dot.node(name, name, shape="ellipse", style="filled", fillcolor="pink")
-
-                # grandparents
                 node(paternal_grandfather, "M")
                 node(paternal_grandmother, "F")
                 dot.edge(paternal_grandfather, father)
                 dot.edge(paternal_grandmother, father)
-
                 node(maternal_grandfather, "M")
                 node(maternal_grandmother, "F")
                 dot.edge(maternal_grandfather, mother)
                 dot.edge(maternal_grandmother, mother)
-
-                # parents
                 node(father, "M")
                 node(mother, "F")
                 dot.edge(father, user_name)
                 dot.edge(mother, user_name)
-
-                # siblings
                 for s in [s.strip() for s in user_siblings.split(",") if s.strip()]:
                     node(s, "M")
                     dot.edge(father, s)
                     dot.edge(mother, s)
-
-                # spouse and children
                 if user_spouse.strip():
                     node(user_spouse, "F")
                     dot.edge(user_name, user_spouse, label="marriage")
-
                 for c in [c.strip() for c in user_children.split(",") if c.strip()]:
-                    node(c, "F" if random.random() > 0.5 else "M")  # Random gender for children
+                    node(c, "F" if random.random() > 0.5 else "M")
                     if user_spouse.strip():
                         dot.edge(user_name, c)
                         dot.edge(user_spouse, c)
                     else:
                         dot.edge(user_name, c)
-
-                # Display the graph
                 st.graphviz_chart(dot)
-                
-                # Store in session state for saving
                 st.session_state.current_genogram = {
                     "dot": dot.source,
                     "title": f"Genogram: {user_name}'s Family"
                 }
 
-            # Save button (always visible after generation)
             if 'current_genogram' in st.session_state:
                 if st.button("💾 Save to History", key="save_genogram"):
                     history_entry = {
@@ -314,40 +331,31 @@ if st.session_state.authenticated:
                     save_user_data(st.session_state.user_email, st.session_state.user_data)
                     st.success(f"Saved {history_entry['title']} to history!")
                     del st.session_state.current_genogram
-                    
 
         # ---------- Ecomap ----------
         elif tool == "Ecomap":
             st.success("🌟 Welcome to Ecomap")
             st.subheader("🌐 Ecomap Tool")
             center = st.session_state.generated_center or st.text_input("Family Member (center)", value="You")
-            
             col1, col2 = st.columns(2)
             with col1:
                 name = st.text_input("Relation factor")
                 entity_type = st.selectbox("Relation Type", ["Person", "Work/School", "Pet", "Agency"])
                 relation = st.radio("Relation Outcome", ["Positive", "Negative", "Complicated"], horizontal=True)
                 direction = st.radio("Relation Direction", ["From user →", "To user ←"], horizontal=True)
-                
                 if st.button("➕ Add Connection"):
                     shape = "circle" if entity_type == "Person" else "box"
                     color = {"Positive": "green", "Negative": "red", "Complicated": "orange"}[relation]
                     style = {"Positive": "solid", "Negative": "dashed", "Complicated": "bold"}[relation]
                     label = {"Positive": "─────", "Negative": "⸺⸺⸺", "Complicated": "/\/\/\/"}[relation]
-                    
-                    # Add to graph
                     st.session_state.ecomap_graph.node(center, center, shape="circle", color="blue")
                     st.session_state.ecomap_graph.node(name, name, shape=shape, color=color)
-                    
                     if direction == "From user →":
                         st.session_state.ecomap_graph.edge(center, name, color=color, label=label, style=style)
                     else:
                         st.session_state.ecomap_graph.edge(name, center, color=color, label=label, style=style)
-            
             with col2:
                 st.graphviz_chart(st.session_state.ecomap_graph)
-                
-                # Save button
                 if st.button("💾 Save to History", key="save_ecomap"):
                     title = f"Ecomap: {center}'s Connections"
                     history_entry = {
@@ -361,34 +369,27 @@ if st.session_state.authenticated:
                     st.session_state.user_data["history"].append(history_entry)
                     save_user_data(st.session_state.user_email, st.session_state.user_data)
                     st.success(f"Saved {title} to history!")
-                    
                 if st.button("🔄 Reset Ecomap", key="reset_ecomap"):
                     st.session_state.ecomap_graph = graphviz.Digraph()
-                    
 
         # ---------- Social Network ----------
         elif tool == "Social":
             st.success("🌟 Welcome to Social Network Diagram")
             st.header("🫂 Social Network")
             center = st.text_input("Your Name (center)", value="You")
-            
             col1, col2 = st.columns(2)
             with col1:
                 name = st.text_input("Connection Name")
                 entity_type = st.selectbox("Entity Type", ["Person", "Work/School", "Pet", "Agency"])
                 relation = st.radio("Relationship Type", ["Positive", "Negative", "Complicated"], horizontal=True)
                 direction = st.radio("Support Direction", ["From user →", "To user ←"], horizontal=True)
-
                 if st.button("➕ Add Connection"):
                     shape = "circle" if entity_type == "Person" else "box"
                     color_map = {"Positive": "green", "Negative": "red", "Complicated": "orange"}
                     style_map = {"Positive": "solid", "Negative": "dashed", "Complicated": "bold"}
                     label_map = {"Positive": "─────", "Negative": "⸺⸺⸺", "Complicated": "/\/\/\/"}
-                    
-                    # Add to graph
                     st.session_state.social_graph.node(center, center, shape="circle", color="blue")
                     st.session_state.social_graph.node(name, name, shape=shape, color=color_map[relation])
-                    
                     if direction == "From user →":
                         st.session_state.social_graph.edge(center, name, 
                                                           color=color_map[relation], 
@@ -399,11 +400,8 @@ if st.session_state.authenticated:
                                                           color=color_map[relation], 
                                                           label=label_map[relation], 
                                                           style=style_map[relation])
-            
             with col2:
                 st.graphviz_chart(st.session_state.social_graph)
-                
-                # Save button
                 if st.button("💾 Save to History", key="save_social"):
                     title = f"Social Network: {center}"
                     history_entry = {
@@ -417,10 +415,8 @@ if st.session_state.authenticated:
                     st.session_state.user_data["history"].append(history_entry)
                     save_user_data(st.session_state.user_email, st.session_state.user_data)
                     st.success(f"Saved {title} to history!")
-                    
                 if st.button("🔄 Reset Social Network", key="reset_social"):
                     st.session_state.social_graph = graphviz.Digraph()
-                   
 
         # ---------- Life Roadmap ----------
         elif tool == "Life":
@@ -436,15 +432,11 @@ if st.session_state.authenticated:
                         st.session_state.user_data["lifemap"] = []
                     st.session_state.user_data["lifemap"].append((time, event, impact))
                     save_user_data(st.session_state.user_email, st.session_state.user_data)
-            
-            # Display timeline
             if st.session_state.user_data.get("lifemap"):
                 st.subheader("Your Life Roadmap")
                 df = pd.DataFrame(st.session_state.user_data["lifemap"], columns=["Time", "Event", "Impact"])
                 st.line_chart(df.set_index("Time")["Impact"])
                 st.dataframe(df)
-                
-                # Save button
                 if st.button("💾 Save to History", key="save_life"):
                     title = f"Life Roadmap: {st.session_state.user_data['bio'].get('name', 'My Life')}"
                     history_entry = {
@@ -462,4 +454,4 @@ if st.session_state.authenticated:
 else:
     render_logo()
     st.title("👥 Jalinan Insan")
-    st.info("Please log in to access the tools.")
+    st.info("Please log in or sign up to access the app features. Use the sidebar to log in or create a new account.")
